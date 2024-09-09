@@ -30,6 +30,14 @@ import xml.etree.ElementTree as et
 # https://secure.ssa.gov/OSSS/er/er001View.do
 # Add 2016 - 2019 earning data from https://www.ssa.gov/oact/cola/AWI.html#Series
 
+# We expect to read in a dictionary, `EarningsRecord', of your Social Security
+# earnings indexed by year, through at least the year you plan to take
+# benefits.  The file should also set the variable `retire_year', to the year
+# you turn 67.  These calculations are valid if you were born on or after 1960.
+# If you are retiring early, still set `retire_year' to the year you reach full
+# retirement age (67), but zero out the income in pre-retirement years to
+# reflect you have stopped contributing.  If you are retiring late, add
+# earnings in the table for those extra years past full retirement age.
 try:
     from mydata import EarningsRecord
 except:
@@ -63,6 +71,12 @@ except:
         2024 :      0.0,
     }
 
+# Year the applicant is 67 years old (assumes born 1960 or later)
+try:
+    from mydata import retire_year
+except:
+    retire_year = max(EarningsRecord.keys())
+
 try:
     namespaces = {'osss': 'http://ssa.gov/osss/schemas/2.0'}
     xtree = et.parse("Your_Social_Security_Statement_Data.xml")
@@ -76,7 +90,6 @@ except:
 
 # National Average Wage Index (NAWI) data as defined by:
 # https://www.ssa.gov/oact/cola/AWI.html
-#
 NationalAverageWageIndexSeries = {
     1951 :  2799.16,   1952 :  2973.32,   1953 :  3139.44,   1954 :  3155.64,   1955 :  3301.44,
     1956 :  3532.36,   1957 :  3641.72,   1958 :  3673.80,   1959 :  3855.80,   1960 :  4007.12,
@@ -123,6 +136,12 @@ for i in range(NationalAverageWageIndexSeries_FirstYear, NationalAverageWageInde
 for i in range(Last_AWI_Year + 1, EarningsRecord_LastYear + 1) :
     AWI_Factors[i] = 1.0
 
+# Calculate the Social Security "Bend Points" for the Primary Insurance Amount
+# (PIA) as defined by:
+# https://www.ssa.gov/oact/cola/piaformula.html
+FirstBendPoint = round(180.0 * NationalAverageWageIndexSeries[NationalAverageWageIndexSeries_LastYear] / 9779.44)
+SecondBendPoint = round(1085.0 * NationalAverageWageIndexSeries[NationalAverageWageIndexSeries_LastYear] / 9779.44)
+
 # Dictionary to hold the amount of annual adjusted earnings (as adjusted by the
 # AWI factors in each year) per year
 AdjustedEarnings = {}
@@ -132,50 +151,54 @@ AdjustedEarnings = {}
 for i in range(EarningsRecord_FirstYear, EarningsRecord_LastYear + 1) :
     AdjustedEarnings[i] = EarningsRecord[i] * AWI_Factors[i]
 
-# Accumulation of the top 35 years of adjusted annual earnings
-Top35YearsEarnings = sum(sorted(AdjustedEarnings.values())[-35:])
+def calculate_monthly(adjEarnings):
+    """Calculate monthly benefit given this adjusted earnings record"""
 
-# Calculate the Average Indexed Monthly earnings (AIME) by dividing the Top 35
-# years of earnings by the number of months in 35 years (35 * 12 = 420)
-AIME = Top35YearsEarnings / 420.0
+    # Accumulation of the top 35 years of adjusted annual earnings
+    Top35YearsEarnings = sum(sorted(adjEarnings.values())[-35:])
 
-# Calculate the Social Security "Bend Points" for the Primary Insurance Amount
-# (PIA) as defined by:
-# https://www.ssa.gov/oact/cola/piaformula.html
-#
-FirstBendPoint = round(180.0 * NationalAverageWageIndexSeries[NationalAverageWageIndexSeries_LastYear] / 9779.44)
-SecondBendPoint = round(1085.0 * NationalAverageWageIndexSeries[NationalAverageWageIndexSeries_LastYear] / 9779.44)
+    # Calculate the Average Indexed Monthly earnings (AIME) by dividing the Top 35
+    # years of earnings by the number of months in 35 years (35 * 12 = 420)
+    AIME = Top35YearsEarnings / 420.0
 
-# Variable to hold the normal monthly benefit amount
-NormalMonthlyBenefit = 0.0;
+    # Variable to hold the normal monthly benefit amount
+    NormalMonthlyBenefit = 0.0;
 
-# If the calculated AIME is below the first bend point
-if AIME <= FirstBendPoint:
-    NormalMonthlyBenefit = 0.9 * AIME
-# Otherwise, if the AIME is between the two bend points
-elif AIME > FirstBendPoint and AIME <= SecondBendPoint:
-    NormalMonthlyBenefit = (0.9 * FirstBendPoint) + ( 0.32 * (AIME - FirstBendPoint) )
-# Otherwise if the AIME is beyond the second bend point
-else:
-    NormalMonthlyBenefit = (0.9 * FirstBendPoint) + ( 0.32 * (SecondBendPoint - FirstBendPoint) ) + ( 0.15 * (AIME - SecondBendPoint) )
+    # If the calculated AIME is below the first bend point
+    if AIME <= FirstBendPoint:
+        NormalMonthlyBenefit = 0.9 * AIME
+    # Otherwise, if the AIME is between the two bend points
+    elif AIME > FirstBendPoint and AIME <= SecondBendPoint:
+        NormalMonthlyBenefit = (0.9 * FirstBendPoint) + ( 0.32 * (AIME - FirstBendPoint) )
+    # Otherwise if the AIME is beyond the second bend point
+    else:
+        NormalMonthlyBenefit = (0.9 * FirstBendPoint) + ( 0.32 * (SecondBendPoint - FirstBendPoint) ) + ( 0.15 * (AIME - SecondBendPoint) )
 
-# The monthly benefit amount is rounded down to the nearest 0.10
-NormalMonthlyBenefit = (floor(NormalMonthlyBenefit * 10.0)) / 10.0
+    # The monthly benefit amount is rounded down to the nearest 0.10
+    NormalMonthlyBenefit = (floor(NormalMonthlyBenefit * 10.0)) / 10.0
 
-# Calculate the reduced monthly benefit. Note that this takes into account the
-# worst case scenario (70%). Depending on your birth date and how early you
-# begin drawing Social Security, this number may be different.
-ReducedMonthlyBenefit = 0.7 * NormalMonthlyBenefit
-ReducedMonthlyBenefit = (floor(ReducedMonthlyBenefit * 10.0)) / 10.0
+    if False:
+        print ("\nTop 35 Years of Adjusted Earnings _________" + "{:11.2f}".format(Top35YearsEarnings))
+        print ("Average Indexed Monthly Earnings (AIME) ___" + "{:11.2f}".format(AIME))
+        print ("First Bend Point __________________________" + "{:11.2f}".format(FirstBendPoint))
+        print ("Second Bend Point _________________________" + "{:11.2f}".format(SecondBendPoint))
 
-# Print the results
-print ("Top 35 Years of Adjusted Earnings _________" + "{:11.2f}".format(Top35YearsEarnings))
-print ("Average Indexed Monthly Earnings (AIME) ___" + "{:11.2f}".format(AIME))
-print ("First Bend Point __________________________" + "{:11.2f}".format(FirstBendPoint))
-print ("Second Bend Point _________________________" + "{:11.2f}".format(SecondBendPoint))
-print ("Normal Monthly Benefit ____________________" + "{:11.2f}".format(NormalMonthlyBenefit))
-print ("Normal Annual Benefit _____________________" + "{:11.2f}".format(NormalMonthlyBenefit * 12.0))
-print ("Reduced (70%) Monthly Benefit _____________" + "{:11.2f}".format(ReducedMonthlyBenefit))
-print ("Reduced (70%) Annual Benefit ______________" + "{:11.2f}".format(ReducedMonthlyBenefit * 12.0))
+    return NormalMonthlyBenefit, Top35YearsEarnings
 
+# Starting benefits earlier or later than full retirement age modifies monthly
+# payout forever.
+# Note: Delayed retirement credits take effect the January after they are
+# earned for +1 and +2 years, so your official statement will show a lower
+# amount than we do here because they are showing your check amount for the
+# month of your birthday.  Your check should increase the following January.
+age_derating = {
+    -5: 0.700, -4:0.750, -3:0.800, -2:0.867, -1:0.933,
+    0:1.00, 1:1.08, 2:1.16, 3:1.24,
+}
 
+print("Benefits benefits by retirement age")
+print("%3s %8s %9s %9s" % ("Age", "Monthly", "Yearly", "Earnings"))
+for ret_year_delta in sorted(age_derating.keys()):
+    mo_benefit, top_earnings = calculate_monthly({k: AdjustedEarnings[k] for k in AdjustedEarnings.keys() if k <= retire_year + ret_year_delta})
+    monthly_benefit = age_derating[ret_year_delta] * mo_benefit
+    print("%3d %8.0f %9.0f %9.0f" % (ret_year_delta + 67, monthly_benefit, 12*monthly_benefit, top_earnings))
